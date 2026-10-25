@@ -71,6 +71,26 @@ class BatchTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 dispatch(self.args)
 
+    def test_invalid_threshold_is_rejected_before_credentials_or_api(self):
+        for threshold in (float('nan'), float('inf'), -1, 2):
+            self.args.threshold = threshold
+            with self.subTest(threshold=threshold), patch.dict('os.environ', {}, clear=True), \
+                    patch('jev_labeler.after_review.subprocess.check_output') as credentials, \
+                    patch('jev_labeler.after_review.GitHub') as github:
+                github.return_value.pages.return_value = []
+                with self.assertRaisesRegex(ValueError, 'Threshold'):
+                    dispatch(self.args)
+                credentials.assert_not_called()
+                github.assert_not_called()
+
+    def test_valid_threshold_boundaries_allow_empty_batches(self):
+        self.github.pages.return_value = []
+        for threshold in (0, .75, 1):
+            self.args.threshold = threshold
+            with self.subTest(threshold=threshold), \
+                    patch('jev_labeler.after_review.GitHub', return_value=self.github):
+                self.assertEqual(dispatch(self.args)['results'], [])
+
     def test_single_pr_cli_keeps_sanitized_errors(self):
         for failure in (KeyError('PRIVATE'), TypeError('PRIVATE'), OSError('PRIVATE')):
             with self.subTest(error=type(failure).__name__), \

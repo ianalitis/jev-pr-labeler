@@ -13,9 +13,13 @@ from .review import completed_review, review_identity
 from .taxonomy import LABELS
 
 
-def run(args):
-    if not math.isfinite(args.threshold) or not 0 <= args.threshold <= 1:
+def validate_threshold(threshold):
+    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
         raise ValueError("Threshold must be finite and between 0 and 1.")
+
+
+def run(args):
+    validate_threshold(args.threshold)
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True)

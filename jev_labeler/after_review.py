@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 
-from .__main__ import error_message, run
+from .__main__ import error_message, run, validate_threshold
 from .github import GitHub
 
 
@@ -27,6 +27,7 @@ def targets(github, pr=None, check_sha=None, all_open=False):
 
 
 def dispatch(args):
+    validate_threshold(args.threshold)
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         token = subprocess.check_output(["gh", "auth", "token"], text=True).strip()
