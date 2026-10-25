@@ -1,5 +1,6 @@
 """Bounded, non-redirecting JSON transport. Never includes response bodies in errors."""
 import json
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -27,7 +28,7 @@ def request_json(url, token, method="GET", body=None, limit=8 * 1024 * 1024):
         status = exc.code
         exc.close()
         raise APIError(status) from None
-    except (URLError, TimeoutError, OSError):
+    except (URLError, TimeoutError, OSError, HTTPException):
         raise RuntimeError("API connection failed or timed out.") from None
     if len(raw) > limit:
         raise RuntimeError("API response exceeded the safety limit.")
