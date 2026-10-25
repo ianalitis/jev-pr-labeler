@@ -111,6 +111,8 @@ python3 -m jev_labeler.after_review --repo owner/repo --all-open
 Add `--apply --ensure-labels` only for deliberately user-owned labels.
 This emits an outcome for every open PR: labeled, `waiting_for_greptile`,
 `blocked_evidence`, or error. It never treats missing evidence as merge readiness.
+Expected per-PR failures are reported without discarding other PR outcomes. The
+batch exits nonzero if any PR errors; waiting or blocked evidence alone is not an error.
 For direct local classification with review context, use
 `python3 -m jev_labeler --repo owner/repo --pr 123 --require-greptile`. The original CLI can still be used
 without that flag for explicitly independent, diff-only use. The action defaults

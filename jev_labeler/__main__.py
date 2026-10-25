@@ -104,6 +104,15 @@ def run(args):
     return report
 
 
+def error_message(exc):
+    # Do not print raw model/PR/HTTP data. Other exception strings are authored locally.
+    if isinstance(exc, (KeyError, TypeError)):
+        return "Unexpected API response shape; no classification can be trusted."
+    if isinstance(exc, OSError):
+        return "Local credential helper or network operation failed."
+    return str(exc)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="GitHub owner/repository")
@@ -116,14 +125,7 @@ def main():
     try:
         report = run(args)
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
-        # Do not print raw model/PR/HTTP data. Exception strings here are authored locally.
-        if isinstance(exc, (KeyError, TypeError)):
-            message = "Unexpected API response shape; no classification can be trusted."
-        elif isinstance(exc, OSError):
-            message = "Local credential helper or network operation failed."
-        else:
-            message = str(exc)
-        print(f"jev-pr-labeler: {message}", file=sys.stderr)
+        print(f"jev-pr-labeler: {error_message(exc)}", file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2, allow_nan=False))
     return 0

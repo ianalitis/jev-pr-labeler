@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 
-from .__main__ import run
+from .__main__ import error_message, run
 from .github import GitHub
 
 
@@ -38,9 +38,8 @@ def dispatch(args):
         single.pr = number
         try:
             reports.append(run(single))
-        except (ValueError, RuntimeError) as exc:
-            # Exception messages are local, never raw HTTP responses or PR content.
-            reports.append({"pull_request": number, "status": "error", "reason": str(exc)})
+        except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            reports.append({"pull_request": number, "status": "error", "reason": error_message(exc)})
     return {"repository": args.repo, "requested_head_sha": args.check_sha,
             "matched_open_prs": len(numbers), "results": reports}
 
