@@ -52,8 +52,42 @@ def composite_script():
     return textwrap.dedent("\n".join(body))
 
 
+def action_env_keys():
+    """Env names the composite step declares, so the stub harness cannot drift."""
+    lines = ACTION.read_text().splitlines()
+    start = next(index for index, line in enumerate(lines) if line.strip() == "env:")
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    keys = []
+    for line in lines[start + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        name = line.strip().split(":", 1)[0]
+        if name:
+            keys.append(name)
+    return keys
+
+
+# Mirrors the defaults declared in action.yml. Every key there must appear here so a
+# step that reads an input cannot silently skip the stubbed python3 in these tests.
+STEP_ENV = {
+    "PYTHONPATH": ".",
+    "GITHUB_TOKEN": "test-token",
+    "GH_TOKEN": "test-token",
+    "OPENROUTER_API_KEY": "test-key",
+    "LABEL_REPOSITORY": "owner/repo",
+    "LABEL_PR": "",
+    "LABEL_CHECK_SHA": "",
+    "LABEL_REQUIRE_REVIEW": "true",
+    "LABEL_APPLY": "false",
+}
+
+
 class CompositeActionTests(unittest.TestCase):
     """Run the step with a stub python3: the input-to-flag mapping is production behavior."""
+
+    def test_step_env_mirrors_action_yml(self):
+        missing = [key for key in action_env_keys() if key not in STEP_ENV]
+        self.assertEqual(missing, [], "the stub env omits action.yml env keys: %s" % missing)
 
     def run_step(self, **inputs):
         with tempfile.TemporaryDirectory() as directory:
@@ -66,13 +100,8 @@ class CompositeActionTests(unittest.TestCase):
                 "PATH": "%s%s%s" % (root, os.pathsep, os.environ["PATH"]),
                 "GITHUB_ACTION_PATH": str(root),
                 "ARGV_FILE": str(record),
-                # Mirrors the defaults declared in action.yml.
-                "LABEL_REPOSITORY": "owner/repo",
-                "LABEL_PR": "",
-                "LABEL_CHECK_SHA": "",
-                "LABEL_REQUIRE_REVIEW": "true",
-                "LABEL_APPLY": "false",
             }
+            env.update(STEP_ENV)
             env.update(inputs)
             result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", composite_script()],
                                     env=env, cwd=directory, capture_output=True, text=True)
