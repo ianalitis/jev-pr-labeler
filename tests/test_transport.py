@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import unittest
 from unittest.mock import patch, MagicMock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from jev_labeler import transport
 from jev_labeler.transport import APIError, NoRedirect, request_json
 
@@ -20,10 +20,12 @@ class LoopbackHandler(BaseHTTPRequestHandler):
 
     seen = []
 
-    def _send(self, status, body=b'', retry_after=None):
+    def _send(self, status, body=b'', retry_after=None, remaining=None):
         self.send_response(status)
         if retry_after is not None:
             self.send_header('Retry-After', retry_after)
+        if remaining is not None:
+            self.send_header('X-RateLimit-Remaining', remaining)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         if body:
@@ -32,7 +34,12 @@ class LoopbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.seen.append(('GET', self.path))
         hits = len([item for item in self.seen if item == ('GET', self.path)])
-        if self.path == '/flaky' and hits == 1:
+        if self.path == '/drop' and hits == 1:
+            # Hang up with no response at all, like a reset mid-request.
+            self.close_connection = True
+        elif self.path == '/throttled' and hits == 1:
+            self._send(403, b'PRIVATE BODY', remaining='0')
+        elif self.path == '/flaky' and hits == 1:
             self._send(503, b'PRIVATE BODY', retry_after='1')
         elif self.path == '/always':
             self._send(429, b'PRIVATE BODY')
@@ -44,7 +51,10 @@ class LoopbackHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.seen.append(('POST', self.path))
         self.rfile.read(int(self.headers.get('Content-Length') or 0))
-        self._send(503, b'PRIVATE BODY')
+        if self.path == '/write-drop':
+            self.close_connection = True
+        else:
+            self._send(503, b'PRIVATE BODY')
 
     def log_message(self, *args):
         pass
@@ -60,18 +70,28 @@ class TransportTests(unittest.TestCase):
                     request_json('https://api.github.com/x', 'secret')
                 self.assertNotIn('PRIVATE', str(error.exception))
 
+    @patch('jev_labeler.transport.time.sleep')
     @patch('jev_labeler.transport.build_opener')
-    def test_truncated_chunked_response_is_sanitized(self, opener):
-        socket = MagicMock()
-        socket.makefile.return_value = io.BytesIO(
-            b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n20\r\nPRIVATE')
-        response = HTTPResponse(socket)
-        response.begin()
-        opener.return_value.open.return_value = response
+    def test_truncated_chunked_response_is_sanitized(self, opener, sleep):
+        responses = []
+
+        def truncated(*args, **kwargs):
+            socket = MagicMock()
+            socket.makefile.return_value = io.BytesIO(
+                b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n20\r\nPRIVATE')
+            response = HTTPResponse(socket)
+            response.begin()
+            responses.append(response)
+            return response
+
+        opener.return_value.open.side_effect = truncated
         with self.assertRaisesRegex(RuntimeError, 'API connection failed') as error:
             request_json('https://api.github.com/x', 'secret')
         self.assertNotIn('PRIVATE', str(error.exception))
-        self.assertTrue(response.isclosed())
+        # A truncated body is a transient read fault, so it is retried and then reported.
+        self.assertEqual(len(responses), transport.RETRY_ATTEMPTS)
+        self.assertEqual(sleep.call_count, transport.RETRY_ATTEMPTS - 1)
+        self.assertTrue(all(response.isclosed() for response in responses))
 
     def test_no_redirects(self):
         self.assertIsNone(NoRedirect().redirect_request(None, None, 302, '', {}, 'https://attacker.test'))
@@ -134,6 +154,61 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(opener.return_value.open.call_count, 1)
         sleep.assert_not_called()
 
+    @patch('jev_labeler.transport.time.sleep')
+    @patch('jev_labeler.transport.build_opener')
+    def test_connection_failures_are_retried_for_reads(self, opener, sleep):
+        opener.return_value.open.side_effect = [URLError('PRIVATE reset'), ok_response()]
+        self.assertEqual(request_json('https://api.github.com/x', 'secret'), {'ok': True})
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    @patch('jev_labeler.transport.time.sleep')
+    @patch('jev_labeler.transport.build_opener')
+    def test_exhausted_connection_failures_stay_sanitized(self, opener, sleep):
+        opener.return_value.open.side_effect = [
+            URLError('PRIVATE'), TimeoutError('PRIVATE'), BadStatusLine('PRIVATE')]
+        with self.assertRaisesRegex(RuntimeError, 'API connection failed') as error:
+            request_json('https://api.github.com/x', 'secret')
+        self.assertNotIn('PRIVATE', str(error.exception))
+        self.assertEqual(opener.return_value.open.call_count, transport.RETRY_ATTEMPTS)
+        self.assertEqual(sleep.call_count, transport.RETRY_ATTEMPTS - 1)
+
+    @patch('jev_labeler.transport.time.sleep')
+    @patch('jev_labeler.transport.build_opener')
+    def test_write_connection_failure_is_not_retried(self, opener, sleep):
+        opener.return_value.open.side_effect = URLError('PRIVATE')
+        with self.assertRaisesRegex(RuntimeError, 'API connection failed') as error:
+            request_json('https://api.github.com/x', 'secret', 'POST', {'a': 1})
+        self.assertNotIn('PRIVATE', str(error.exception))
+        self.assertEqual(opener.return_value.open.call_count, 1)
+        sleep.assert_not_called()
+
+    @patch('jev_labeler.transport.time.sleep')
+    @patch('jev_labeler.transport.build_opener')
+    def test_rate_limited_403_is_retried_for_reads(self, opener, sleep):
+        opener.return_value.open.side_effect = [
+            HTTPError('https://secret', 403, 'TOKEN',
+                      {'X-RateLimit-Remaining': '0'}, io.BytesIO(b'PRIVATE')),
+            ok_response(),
+        ]
+        self.assertEqual(request_json('https://api.github.com/x', 'secret'), {'ok': True})
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        # No Retry-After on a throttle, so the bounded exponential backoff applies.
+        sleep.assert_called_once_with(0.5)
+
+    @patch('jev_labeler.transport.time.sleep')
+    @patch('jev_labeler.transport.build_opener')
+    def test_exhausted_rate_limit_mentions_throttling(self, opener, sleep):
+        opener.return_value.open.side_effect = [
+            HTTPError('https://secret', 403, 'TOKEN', {'Retry-After': '3'}, io.BytesIO(b'PRIVATE'))
+            for _ in range(transport.RETRY_ATTEMPTS)]
+        with self.assertRaises(APIError) as error:
+            request_json('https://api.github.com/x', 'secret')
+        self.assertEqual(error.exception.status, 403)
+        self.assertIn('rate-limit', str(error.exception))
+        self.assertNotIn('PRIVATE', str(error.exception))
+        self.assertEqual(sleep.call_args_list, [((3.0,), {})] * (transport.RETRY_ATTEMPTS - 1))
+
     def test_retry_delay_is_bounded_and_ignores_unsafe_values(self):
         for raw, expected in ((None, 0.5), ('2', 2.0), ('60', transport.MAX_RETRY_DELAY),
                               ('0', 0.5), ('-3', 0.5), ('nan', 0.5), ('inf', 0.5),
@@ -195,4 +270,24 @@ class LoopbackRetryTests(unittest.TestCase):
             request_json(self.root + '/write', 'secret', 'POST', {'a': 1})
         self.assertEqual(error.exception.status, 503)
         self.assertEqual(LoopbackHandler.seen, [('GET', '/forbidden'), ('POST', '/write')])
+        sleep.assert_not_called()
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_dropped_connection_is_retried(self, sleep):
+        self.assertEqual(request_json(self.root + '/drop', 'secret'), {'ok': True})
+        self.assertEqual(LoopbackHandler.seen, [('GET', '/drop'), ('GET', '/drop')])
+        sleep.assert_called_once_with(0.5)
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_rate_limited_read_is_retried(self, sleep):
+        self.assertEqual(request_json(self.root + '/throttled', 'secret'), {'ok': True})
+        self.assertEqual(LoopbackHandler.seen, [('GET', '/throttled'), ('GET', '/throttled')])
+        sleep.assert_called_once_with(0.5)
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_write_connection_drop_is_not_retried(self, sleep):
+        with self.assertRaisesRegex(RuntimeError, 'API connection failed') as error:
+            request_json(self.root + '/write-drop', 'secret', 'POST', {'a': 1})
+        self.assertNotIn('PRIVATE', str(error.exception))
+        self.assertEqual(LoopbackHandler.seen, [('POST', '/write-drop')])
         sleep.assert_not_called()
