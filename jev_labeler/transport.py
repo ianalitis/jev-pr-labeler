@@ -9,6 +9,8 @@ call is worse than a visible failure.
 import json
 import math
 import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -36,11 +38,18 @@ class NoRedirect(HTTPRedirectHandler):
 
 def _retry_delay(headers, attempt):
     """Return a bounded wait, or None when the server requires a longer delay."""
+    value = (headers or {}).get("Retry-After")
     try:
-        seconds = float((headers or {}).get("Retry-After"))
+        seconds = float(value)
     except (TypeError, ValueError):
-        seconds = 0.0
-    if not math.isfinite(seconds) or seconds <= 0:
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            seconds = max(0.0, deadline.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError, OSError):
+            seconds = -1.0
+    if not math.isfinite(seconds) or seconds < 0:
         seconds = 0.5 * 2 ** attempt
         return min(seconds, MAX_RETRY_DELAY)
     return seconds if seconds <= MAX_RETRY_DELAY else None

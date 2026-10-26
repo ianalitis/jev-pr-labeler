@@ -1,4 +1,5 @@
 import io
+from email.utils import formatdate
 from http.client import BadStatusLine, HTTPResponse, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -45,6 +46,8 @@ class LoopbackHandler(BaseHTTPRequestHandler):
             self._send(429, b'PRIVATE BODY')
         elif self.path == '/long-wait':
             self._send(429, b'PRIVATE BODY', retry_after='60')
+        elif self.path == '/date-wait':
+            self._send(429, b'PRIVATE BODY', retry_after='Wed, 21 Oct 2099 07:28:00 GMT')
         elif self.path == '/forbidden':
             self._send(403, b'PRIVATE BODY')
         else:
@@ -213,12 +216,22 @@ class TransportTests(unittest.TestCase):
 
     def test_retry_delay_is_bounded_and_ignores_unsafe_values(self):
         for raw, expected in ((None, 0.5), ('2', 2.0), ('5', 5.0), ('60', None),
-                              ('0', 0.5), ('-3', 0.5), ('nan', 0.5), ('inf', 0.5),
-                              ('Wed, 21 Oct 2015 07:28:00 GMT', 0.5)):
+                              ('0', 0.0), ('-3', 0.5), ('nan', 0.5), ('inf', 0.5)):
             with self.subTest(retry_after=raw):
                 self.assertEqual(transport._retry_delay({'Retry-After': raw}, 0), expected)
         self.assertEqual(transport._retry_delay({'Retry-After': 'bogus'}, 2), 2.0)
         self.assertEqual(transport._retry_delay(None, 2), 2.0)
+
+    @patch('jev_labeler.transport.time.time', return_value=1445412480)
+    def test_http_date_retry_after(self, clock):
+        for offset, expected in ((-60, 0), (0, 0), (2, 2), (5, 5), (60, None)):
+            with self.subTest(offset=offset):
+                header = formatdate(clock.return_value + offset, usegmt=True)
+                self.assertEqual(transport._retry_delay({'Retry-After': header}, 0), expected)
+        self.assertEqual(transport._retry_delay({'Retry-After': 'Wed Oct 21 07:28:02 2015'}, 0), 2)
+        for header in ('not a date', 'Wed, 99 Oct 2015 07:28:00 GMT'):
+            with self.subTest(header=header):
+                self.assertEqual(transport._retry_delay({'Retry-After': header}, 0), 0.5)
 
 
 class LoopbackRetryTests(unittest.TestCase):
@@ -269,6 +282,14 @@ class LoopbackRetryTests(unittest.TestCase):
             request_json(self.root + '/long-wait', 'secret')
         self.assertEqual(error.exception.status, 429)
         self.assertEqual(LoopbackHandler.seen, [('GET', '/long-wait')])
+        sleep.assert_not_called()
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_future_retry_date_stops_without_retrying_early(self, sleep):
+        with self.assertRaises(APIError) as error:
+            request_json(self.root + '/date-wait', 'secret')
+        self.assertEqual(error.exception.status, 429)
+        self.assertEqual(LoopbackHandler.seen, [('GET', '/date-wait')])
         sleep.assert_not_called()
 
     @patch('jev_labeler.transport.time.sleep')
