@@ -4,7 +4,7 @@ import os
 import sys
 import unittest
 from unittest.mock import patch
-from jev_labeler.__main__ import run
+from jev_labeler.__main__ import error_message, run
 from jev_labeler.classifier import build_request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -244,3 +244,25 @@ class CLITests(unittest.TestCase):
         self.assertTrue(result['verified'])
         self.assertEqual({x['name'] for x in self.github.pr['labels']},
                          {'Type: Feature', 'SIZE: L', 'area: tui', 'area: config'})
+
+
+class ErrorMessageTests(unittest.TestCase):
+    """Diagnostics must name the real cause and never echo remote or credential data."""
+
+    def test_missing_credential_helper_is_named(self):
+        message = error_message(FileNotFoundError(2, 'No such file or directory', 'gh'))
+        self.assertIn('gh', message)
+        self.assertIn('GH_TOKEN', message)
+        self.assertNotIn('No such file or directory', message)
+
+    def test_network_errors_keep_the_generic_wording(self):
+        self.assertEqual(error_message(OSError('PRIVATE connection reset')),
+                         'Local credential helper or network operation failed.')
+
+    def test_unexpected_shapes_stay_generic(self):
+        self.assertEqual(error_message(KeyError('PRIVATE data')),
+                         'Unexpected API response shape; no classification can be trusted.')
+
+    def test_locally_authored_messages_pass_through(self):
+        self.assertEqual(error_message(RuntimeError('API connection failed or timed out.')),
+                         'API connection failed or timed out.')

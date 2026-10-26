@@ -112,6 +112,8 @@ def error_message(exc):
     # Do not print raw model/PR/HTTP data. Other exception strings are authored locally.
     if isinstance(exc, (KeyError, TypeError)):
         return "Unexpected API response shape; no classification can be trusted."
+    if isinstance(exc, FileNotFoundError):
+        return "GitHub CLI (gh) was not found on PATH; install it or set GH_TOKEN or GITHUB_TOKEN."
     if isinstance(exc, OSError):
         return "Local credential helper or network operation failed."
     return str(exc)
