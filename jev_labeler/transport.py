@@ -36,6 +36,11 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _backoff(attempt):
+    """Our own bounded exponential wait, used when the server gives no usable delay."""
+    return min(0.5 * 2 ** attempt, MAX_RETRY_DELAY)
+
+
 def _retry_delay(headers, attempt):
     """Return a bounded wait, or None when the server requires a longer delay."""
     value = (headers or {}).get("Retry-After")
@@ -48,10 +53,12 @@ def _retry_delay(headers, attempt):
                 deadline = deadline.replace(tzinfo=timezone.utc)
             seconds = max(0.0, deadline.timestamp() - time.time())
         except (TypeError, ValueError, OverflowError, OSError):
-            seconds = -1.0
-    if not math.isfinite(seconds) or seconds < 0:
-        seconds = 0.5 * 2 ** attempt
-        return min(seconds, MAX_RETRY_DELAY)
+            return _backoff(attempt)
+    if math.isnan(seconds) or seconds < 0:
+        # A bogus or negative value is no instruction at all, so use our own backoff.
+        return _backoff(attempt)
+    # A positive delay is the server's floor: infinity here means an oversized value
+    # that overflowed, and both must stop rather than retry earlier than allowed.
     return seconds if seconds <= MAX_RETRY_DELAY else None
 
 
@@ -79,13 +86,16 @@ def request_json(url, token, method="GET", body=None, limit=8 * 1024 * 1024):
         except HTTPError as exc:
             status, response_headers = exc.code, exc.headers
             exc.close()
-            throttled = status in RETRY_STATUSES or (status == 403 and _rate_limited(response_headers))
+            # Only 429 and a header-backed 403 are actually rate limits; a bare 5xx is
+            # a server fault, so the rate-limit hint would misdescribe it.
+            rate_limited = status == 429 or (status == 403 and _rate_limited(response_headers))
+            throttled = rate_limited or status in RETRY_STATUSES
             if throttled and not last:
                 delay = _retry_delay(response_headers, attempt)
                 if delay is not None:
                     time.sleep(delay)
                     continue
-            raise APIError(status, RATE_LIMIT_HINT if throttled else "") from None
+            raise APIError(status, RATE_LIMIT_HINT if rate_limited else "") from None
         except (URLError, TimeoutError, OSError, HTTPException):
             # A dropped connection or timeout before the body completes is safe to
             # repeat for an idempotent read, and is the most common transient fault.

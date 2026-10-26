@@ -173,14 +173,14 @@ PR title, description, filenames, and patches are sent to OpenRouter/TypeSafe.
 Do not enable this on private code without approving that data flow. Reports do
 not echo patches, descriptions, or keys. Raw HTTP error bodies are never logged.
 Idempotent reads are retried at most twice with bounded backoff. `Retry-After`
-accepts seconds or an HTTP-date. A delay above the five-second wait budget stops
-the request rather than retrying earlier than the server allows. Retries cover
-transient `429`/`5xx`, a `403` that is really
-throttling (`Retry-After`, or `X-RateLimit-Remaining: 0`), and a dropped
-connection or timeout before a response arrives. Exhausted retries fail with a
-sanitized error naming the status or the throttling hint. Label writes and paid
-inference requests are never retried: a duplicate write or model call is worse
-than a visible failure.
+accepts seconds or an HTTP-date. A delay above the five-second per-wait budget,
+or one too large to read as a finite number, stops the request rather than
+retrying earlier than the server allows. Retries cover transient `429`/`5xx`, a
+`403` that is really throttling (`Retry-After`, or `X-RateLimit-Remaining: 0`),
+and a dropped connection or timeout before a response arrives. Exhausted retries
+fail with a sanitized error naming the status, and the throttling hint appears
+only for a real rate limit. Label writes and paid inference requests are never
+retried: a duplicate write or model call is worse than a visible failure.
 
 Lockfile/generated/vendor patches are omitted as incidental evidence while their
 filenames remain visible. This is not a security audit or dependency vulnerability
