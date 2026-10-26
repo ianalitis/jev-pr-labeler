@@ -35,14 +35,15 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def _retry_delay(headers, attempt):
-    """Wait before a retry: a sane Retry-After, else bounded exponential backoff."""
+    """Return a bounded wait, or None when the server requires a longer delay."""
     try:
         seconds = float((headers or {}).get("Retry-After"))
     except (TypeError, ValueError):
         seconds = 0.0
     if not math.isfinite(seconds) or seconds <= 0:
         seconds = 0.5 * 2 ** attempt
-    return min(seconds, MAX_RETRY_DELAY)
+        return min(seconds, MAX_RETRY_DELAY)
+    return seconds if seconds <= MAX_RETRY_DELAY else None
 
 
 def _rate_limited(headers):
@@ -71,8 +72,10 @@ def request_json(url, token, method="GET", body=None, limit=8 * 1024 * 1024):
             exc.close()
             throttled = status in RETRY_STATUSES or (status == 403 and _rate_limited(response_headers))
             if throttled and not last:
-                time.sleep(_retry_delay(response_headers, attempt))
-                continue
+                delay = _retry_delay(response_headers, attempt)
+                if delay is not None:
+                    time.sleep(delay)
+                    continue
             raise APIError(status, RATE_LIMIT_HINT if throttled else "") from None
         except (URLError, TimeoutError, OSError, HTTPException):
             # A dropped connection or timeout before the body completes is safe to

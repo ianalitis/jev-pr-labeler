@@ -43,6 +43,8 @@ class LoopbackHandler(BaseHTTPRequestHandler):
             self._send(503, b'PRIVATE BODY', retry_after='1')
         elif self.path == '/always':
             self._send(429, b'PRIVATE BODY')
+        elif self.path == '/long-wait':
+            self._send(429, b'PRIVATE BODY', retry_after='60')
         elif self.path == '/forbidden':
             self._send(403, b'PRIVATE BODY')
         else:
@@ -210,7 +212,7 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(sleep.call_args_list, [((3.0,), {})] * (transport.RETRY_ATTEMPTS - 1))
 
     def test_retry_delay_is_bounded_and_ignores_unsafe_values(self):
-        for raw, expected in ((None, 0.5), ('2', 2.0), ('60', transport.MAX_RETRY_DELAY),
+        for raw, expected in ((None, 0.5), ('2', 2.0), ('5', 5.0), ('60', None),
                               ('0', 0.5), ('-3', 0.5), ('nan', 0.5), ('inf', 0.5),
                               ('Wed, 21 Oct 2015 07:28:00 GMT', 0.5)):
             with self.subTest(retry_after=raw):
@@ -260,6 +262,14 @@ class LoopbackRetryTests(unittest.TestCase):
         self.assertNotIn('PRIVATE', str(error.exception))
         self.assertEqual(len(LoopbackHandler.seen), transport.RETRY_ATTEMPTS)
         self.assertEqual(sleep.call_count, transport.RETRY_ATTEMPTS - 1)
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_long_retry_after_stops_without_retrying_early(self, sleep):
+        with self.assertRaises(APIError) as error:
+            request_json(self.root + '/long-wait', 'secret')
+        self.assertEqual(error.exception.status, 429)
+        self.assertEqual(LoopbackHandler.seen, [('GET', '/long-wait')])
+        sleep.assert_not_called()
 
     @patch('jev_labeler.transport.time.sleep')
     def test_real_client_errors_and_writes_are_not_retried(self, sleep):

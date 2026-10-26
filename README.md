@@ -172,8 +172,9 @@ opt-out, not enabled in Jcode.
 PR title, description, filenames, and patches are sent to OpenRouter/TypeSafe.
 Do not enable this on private code without approving that data flow. Reports do
 not echo patches, descriptions, or keys. Raw HTTP error bodies are never logged.
-Idempotent reads are retried at most twice with bounded backoff, honoring a
-capped `Retry-After`. That covers transient `429`/`5xx`, a `403` that is really
+Idempotent reads are retried at most twice with bounded backoff. A `Retry-After`
+delay above the five-second wait budget stops the request rather than retrying
+earlier than the server allows. That covers transient `429`/`5xx`, a `403` that is really
 throttling (`Retry-After`, or `X-RateLimit-Remaining: 0`), and a dropped
 connection or timeout before a response arrives. Exhausted retries fail with a
 sanitized error naming the status or the throttling hint. Label writes and paid
