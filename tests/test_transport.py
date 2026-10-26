@@ -1,5 +1,7 @@
 import io
 from http.client import BadStatusLine, HTTPResponse, IncompleteRead
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import unittest
 from unittest.mock import patch, MagicMock
 from urllib.error import HTTPError
@@ -11,6 +13,41 @@ def ok_response(payload=b'{"ok": true}'):
     response = MagicMock()
     response.__enter__.return_value.read.return_value = payload
     return response
+
+
+class LoopbackHandler(BaseHTTPRequestHandler):
+    """Answers like GitHub for the retry paths, and records every request it saw."""
+
+    seen = []
+
+    def _send(self, status, body=b'', retry_after=None):
+        self.send_response(status)
+        if retry_after is not None:
+            self.send_header('Retry-After', retry_after)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_GET(self):
+        self.seen.append(('GET', self.path))
+        hits = len([item for item in self.seen if item == ('GET', self.path)])
+        if self.path == '/flaky' and hits == 1:
+            self._send(503, b'PRIVATE BODY', retry_after='1')
+        elif self.path == '/always':
+            self._send(429, b'PRIVATE BODY')
+        elif self.path == '/forbidden':
+            self._send(403, b'PRIVATE BODY')
+        else:
+            self._send(200, b'{"ok": true}')
+
+    def do_POST(self):
+        self.seen.append(('POST', self.path))
+        self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        self._send(503, b'PRIVATE BODY')
+
+    def log_message(self, *args):
+        pass
 
 
 class TransportTests(unittest.TestCase):
@@ -105,3 +142,57 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(transport._retry_delay({'Retry-After': raw}, 0), expected)
         self.assertEqual(transport._retry_delay({'Retry-After': 'bogus'}, 2), 2.0)
         self.assertEqual(transport._retry_delay(None, 2), 2.0)
+
+
+class LoopbackRetryTests(unittest.TestCase):
+    """Drive the real urllib stack, which a mocked opener cannot exercise.
+
+    Real HTTPError objects, real header casing on Retry-After, and real connection
+    handling are all part of the behavior the action depends on. Sleep is patched so
+    the retry policy is exercised without waiting.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.server = ThreadingHTTPServer(('127.0.0.1', 0), LoopbackHandler)
+        except OSError as exc:  # pragma: no cover - depends on the sandbox
+            raise unittest.SkipTest(f'loopback sockets unavailable: {exc}')
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.root = 'http://127.0.0.1:%d' % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(5)
+
+    def setUp(self):
+        LoopbackHandler.seen = []
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_transient_read_recovers(self, sleep):
+        self.assertEqual(request_json(self.root + '/flaky', 'secret'), {'ok': True})
+        self.assertEqual(LoopbackHandler.seen, [('GET', '/flaky'), ('GET', '/flaky')])
+        sleep.assert_called_once_with(1.0)
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_exhausted_reads_stay_sanitized(self, sleep):
+        with self.assertRaises(APIError) as error:
+            request_json(self.root + '/always', 'secret')
+        self.assertEqual(error.exception.status, 429)
+        self.assertNotIn('PRIVATE', str(error.exception))
+        self.assertEqual(len(LoopbackHandler.seen), transport.RETRY_ATTEMPTS)
+        self.assertEqual(sleep.call_count, transport.RETRY_ATTEMPTS - 1)
+
+    @patch('jev_labeler.transport.time.sleep')
+    def test_real_client_errors_and_writes_are_not_retried(self, sleep):
+        with self.assertRaises(APIError) as error:
+            request_json(self.root + '/forbidden', 'secret')
+        self.assertEqual(error.exception.status, 403)
+        with self.assertRaises(APIError) as error:
+            request_json(self.root + '/write', 'secret', 'POST', {'a': 1})
+        self.assertEqual(error.exception.status, 503)
+        self.assertEqual(LoopbackHandler.seen, [('GET', '/forbidden'), ('POST', '/write')])
+        sleep.assert_not_called()
