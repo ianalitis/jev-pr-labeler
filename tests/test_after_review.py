@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
@@ -62,8 +63,57 @@ class BatchTests(unittest.TestCase):
                 patch('jev_labeler.after_review.run') as run, \
                 patch('sys.stdout', new_callable=io.StringIO) as output:
             self.assertEqual(main(), 0)
-        self.assertEqual(json.loads(output.getvalue())['results'], [])
+        report = json.loads(output.getvalue())
+        self.assertEqual(report['results'], [])
+        self.assertNotIn('status', report)
         run.assert_not_called()
+
+    def test_check_sha_without_a_live_head_reports_no_match(self):
+        self.args.check_sha, self.args.all_open = 'b' * 40, False
+        self.github.pages.return_value = [{'number': 1, 'head': {'sha': 'a' * 40}}]
+        with patch('jev_labeler.after_review.GitHub', return_value=self.github), \
+                patch('jev_labeler.after_review.run') as run:
+            report = dispatch(self.args)
+        self.assertEqual(report['status'], 'no_matching_open_prs')
+        self.assertEqual(report['matched_open_prs'], 0)
+        self.assertEqual(report['results'], [])
+        self.assertIn('head SHA', report['reason'])
+        run.assert_not_called()
+
+    def test_check_sha_match_does_not_report_no_match(self):
+        self.args.check_sha, self.args.all_open = 'a' * 40, False
+        self.github.pages.return_value = [{'number': 1, 'head': {'sha': 'a' * 40}},
+                                          {'number': 2, 'head': {'sha': 'b' * 40}}]
+        with patch('jev_labeler.after_review.GitHub', return_value=self.github), \
+                patch('jev_labeler.after_review.run', return_value=self.first):
+            report = dispatch(self.args)
+        self.assertEqual(report['matched_open_prs'], 1)
+        self.assertNotIn('status', report)
+
+    def test_cli_surfaces_actionable_local_errors(self):
+        cases = ((['--all-open', '--threshold', 'nan'], 'Threshold must be finite'),
+                 (['--check-sha', 'not-a-sha'], '40 lowercase hexadecimal'))
+        for argv, expected in cases:
+            with self.subTest(argv=argv), \
+                    patch('sys.argv', ['after_review', '--repo', 'owner/repo', *argv]), \
+                    patch('jev_labeler.after_review.GitHub') as github, \
+                    patch('sys.stderr', new_callable=io.StringIO) as errors:
+                self.assertEqual(main(), 1)
+                self.assertTrue(errors.getvalue().startswith('jev-pr-labeler: '))
+                self.assertIn(expected, errors.getvalue())
+                self.assertNotIn('credentials', errors.getvalue())
+                github.return_value.pages.assert_not_called()
+
+    def test_cli_keeps_credential_helper_failures_generic(self):
+        with patch.dict('os.environ', {}, clear=True), \
+                patch('sys.argv', ['after_review', '--repo', 'owner/repo', '--all-open']), \
+                patch('jev_labeler.after_review.subprocess.check_output',
+                      side_effect=subprocess.CalledProcessError(1, ['gh', 'auth', 'token'])), \
+                patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(main(), 1)
+        self.assertEqual(errors.getvalue(),
+                         'jev-pr-labeler: could not read a GitHub token from gh; '
+                         'set GH_TOKEN or authenticate gh.\n')
 
     def test_unexpected_programming_errors_are_not_swallowed(self):
         with patch('jev_labeler.after_review.GitHub', return_value=self.github), \

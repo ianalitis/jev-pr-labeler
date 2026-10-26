@@ -41,8 +41,15 @@ def dispatch(args):
             reports.append(run(single))
         except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
             reports.append({"pull_request": number, "status": "error", "reason": error_message(exc)})
-    return {"repository": args.repo, "requested_head_sha": args.check_sha,
-            "matched_open_prs": len(numbers), "results": reports}
+    report = {"repository": args.repo, "requested_head_sha": args.check_sha,
+              "matched_open_prs": len(numbers), "results": reports}
+    if args.check_sha and not numbers:
+        # A check completion can arrive after the PR head moved or the PR closed. No
+        # writes are correct here; make the no-op visible instead of implicitly green.
+        report["status"] = "no_matching_open_prs"
+        report["reason"] = ("No open PR currently has this head SHA. A newer review of the "
+                            "current head triggers its own run.")
+    return report
 
 
 def main():
@@ -60,8 +67,12 @@ def main():
     args = parser.parse_args()
     try:
         report = dispatch(args)
-    except (ValueError, RuntimeError, OSError, KeyError, TypeError, subprocess.CalledProcessError):
-        print("Could not resolve PRs safely. Check credentials and input parameters.", file=sys.stderr)
+    except subprocess.CalledProcessError:
+        print("jev-pr-labeler: could not read a GitHub token from gh; set GH_TOKEN or authenticate gh.",
+              file=sys.stderr)
+        return 1
+    except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+        print(f"jev-pr-labeler: {error_message(exc)}", file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2, allow_nan=False))
     return int(any(item.get("status") == "error" for item in report["results"]))
