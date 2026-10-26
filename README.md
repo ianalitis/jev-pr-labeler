@@ -110,7 +110,9 @@ python3 -m jev_labeler.after_review --repo owner/repo --all-open
 
 Add `--apply --ensure-labels` only for deliberately user-owned labels.
 This emits an outcome for every open PR: labeled, `waiting_for_greptile`,
-`blocked_evidence`, or error. It never treats missing evidence as merge readiness.
+`blocked_evidence`, or error, plus `status: no_matching_open_prs` when a
+`--check-sha` head no longer matches an open PR (a visible no-op, exit 0). It
+never treats missing evidence as merge readiness.
 Expected per-PR failures are reported without discarding other PR outcomes. The
 batch exits nonzero if any PR errors; waiting or blocked evidence alone is not an error.
 For direct local classification with review context, use
@@ -168,12 +170,17 @@ opt-out, not enabled in Jcode.
 PR title, description, filenames, and patches are sent to OpenRouter/TypeSafe.
 Do not enable this on private code without approving that data flow. Reports do
 not echo patches, descriptions, or keys. Raw HTTP error bodies are never logged.
+Transient `429`/`5xx` responses to idempotent reads are retried at most twice
+with bounded backoff, honoring a capped `Retry-After`. Label writes and paid
+inference requests are never retried: a duplicate write or model call is worse
+than a visible failure.
 
 Lockfile/generated/vendor patches are omitted as incidental evidence while their
 filenames remain visible. This is not a security audit or dependency vulnerability
 scanner. For all other files, missing or truncated patches fail closed. Evidence
 is bounded to 2 MB serialized source, 64 excerpts, and 40 KB of state per model
-request. Reduction metadata must also fit the bounded request. The GitHub compare
+request, within an 80 KB serialized wire budget. Reduction metadata must also fit
+the bounded request. The GitHub compare
 API caps its complete file list at 300, so comparisons reaching that boundary are
 rejected rather than assumed complete. Unsupported inputs require manual
 classification, **not a fabricated XL label**. Line counts are used only to detect
