@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 from .__main__ import error_message, run, validate_threshold
+from .evidence import merge_usage
 from .github import GitHub
 
 
@@ -43,6 +44,10 @@ def dispatch(args):
             reports.append({"pull_request": number, "status": "error", "reason": error_message(exc)})
     report = {"repository": args.repo, "requested_head_sha": args.check_sha,
               "matched_open_prs": len(numbers), "results": reports}
+    usages = [item["usage"] for item in reports if isinstance(item.get("usage"), dict)]
+    if usages:
+        # A batch spends real money; report the whole run's usage, not just per PR.
+        report["usage"] = merge_usage({"usage": usage} for usage in usages)
     if args.check_sha and not numbers:
         # A check completion can arrive after the PR head moved or the PR closed. No
         # writes are correct here; make the no-op visible instead of implicitly green.

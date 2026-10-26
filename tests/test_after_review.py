@@ -39,6 +39,23 @@ class BatchTests(unittest.TestCase):
                 self.assertEqual([call.args[0].pr for call in run.call_args_list], [1, 2, 3])
                 self.assertIsNone(self.args.pr)
 
+    def test_batch_reports_aggregate_usage(self):
+        first = dict(self.first, usage={'prompt_tokens': 10, 'completion_tokens': 2.5})
+        last = dict(self.last, usage={'prompt_tokens': 5, 'completion_tokens': 1})
+        with patch('jev_labeler.after_review.GitHub', return_value=self.github), \
+                patch('jev_labeler.after_review.run',
+                      side_effect=[first, RuntimeError('API request failed: HTTP 500.'), last]):
+            report = dispatch(self.args)
+        # 15/3.5 comes from the two successful PRs; the failed one contributes nothing.
+        self.assertEqual(report['usage'], {'prompt_tokens': 15.0, 'completion_tokens': 3.5})
+        self.assertEqual(report['results'][0]['usage'], first['usage'])
+
+    def test_batch_without_any_usage_omits_totals(self):
+        with patch('jev_labeler.after_review.GitHub', return_value=self.github), \
+                patch('jev_labeler.after_review.run', side_effect=[self.first, self.last, self.last]):
+            report = dispatch(self.args)
+        self.assertNotIn('usage', report)
+
     def test_main_emits_complete_json_and_fails_when_one_pr_errors(self):
         closed = {'head': {'sha': 'a' * 40}, 'state': 'closed'}
         self.github.pull.side_effect = [closed, {}, closed]
