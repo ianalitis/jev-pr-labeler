@@ -33,7 +33,7 @@ Requires Python 3.11+, no runtime packages. Run from this repository:
 
 ```bash
 export OPENROUTER_API_KEY='your-key'  # Prefer your secret manager, never commit it.
-# Authenticate gh, or set GH_TOKEN/GITHUB_TOKEN.
+# Authenticate gh, or set GH_TOKEN/GITHUB_TOKEN. A missing gh is reported by name.
 python3 -m jev_labeler --repo owner/repo --pr 123
 # The command above is a dry-run. Explicitly apply with:
 python3 -m jev_labeler --repo owner/repo --pr 123 --apply --ensure-labels
@@ -41,7 +41,9 @@ python3 -m jev_labeler --repo owner/repo --pr 123 --apply --ensure-labels
 
 `--ensure-labels` creates missing taxonomy labels without altering existing colors
 or descriptions. Dry-run never writes to GitHub, but **does make a paid Jev call**.
-The report includes per-question choice/confidence and provider usage/cost.
+The report includes per-question choice/confidence and provider usage/cost; a
+`--all-open` batch also reports one aggregate usage total for the whole run,
+covering only the PRs that actually reported usage.
 Never put tokens in command-line arguments. `.env` is ignored but not auto-loaded.
 The optional package entry point is `jev-pr-labeler` after `pip install .`.
 
@@ -170,8 +172,11 @@ opt-out, not enabled in Jcode.
 PR title, description, filenames, and patches are sent to OpenRouter/TypeSafe.
 Do not enable this on private code without approving that data flow. Reports do
 not echo patches, descriptions, or keys. Raw HTTP error bodies are never logged.
-Transient `429`/`5xx` responses to idempotent reads are retried at most twice
-with bounded backoff, honoring a capped `Retry-After`. Label writes and paid
+Idempotent reads are retried at most twice with bounded backoff, honoring a
+capped `Retry-After`. That covers transient `429`/`5xx`, a `403` that is really
+throttling (`Retry-After`, or `X-RateLimit-Remaining: 0`), and a dropped
+connection or timeout before a response arrives. Exhausted retries fail with a
+sanitized error naming the status or the throttling hint. Label writes and paid
 inference requests are never retried: a duplicate write or model call is worse
 than a visible failure.
 

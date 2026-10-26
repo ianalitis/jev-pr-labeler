@@ -8,7 +8,8 @@ These observations are integration checks, not an accuracy benchmark.
 
 ## Offline and hosted tests
 
-`python3 -m unittest discover -s tests -v`: 62 tests pass locally.
+`python3 -m unittest discover -s tests -v`: 62 tests passed locally on the date
+of this record; the suite has grown since, so trust the command over this count.
 GitHub Actions runs the same suite on Python 3.11 and 3.14.
 
 Coverage includes the 26-label taxonomy, exact choice schemas, probability
